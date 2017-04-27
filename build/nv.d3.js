@@ -1,4 +1,4 @@
-/* nvd3 version 1.8.5-dev (https://github.com/novus/nvd3) 2017-02-15 */
+/* nvd3 version 1.8.5-dev (https://github.com/novus/nvd3) 2017-04-27 */
 (function(){
 
 // set up main nv object
@@ -1590,6 +1590,27 @@ nv.utils.arrayEquals = function (array1, array2) {
     }
     return true;
 };
+
+/*
+ Check if a point within an arc
+ */
+nv.utils.pointIsInArc = function(pt, ptData, d3Arc) {
+    // Center of the arc is assumed to be 0,0
+    // (pt.x, pt.y) are assumed to be relative to the center
+    var r1 = d3Arc.innerRadius()(ptData), // Note: Using the innerRadius
+      r2 = d3Arc.outerRadius()(ptData),
+      theta1 = d3Arc.startAngle()(ptData),
+      theta2 = d3Arc.endAngle()(ptData);
+
+    var dist = pt.x * pt.x + pt.y * pt.y,
+      angle = Math.atan2(pt.x, -pt.y); // Note: different coordinate system.
+
+    angle = (angle < 0) ? (angle + Math.PI * 2) : angle;
+
+    return (r1 * r1 <= dist) && (dist <= r2 * r2) &&
+      (theta1 <= angle) && (angle <= theta2);
+};
+
 nv.models.axis = function() {
     "use strict";
 
@@ -3356,6 +3377,7 @@ nv.models.cumulativeLineChart = function() {
     var dx = d3.scale.linear()
         , index = {i: 0, x: 0}
         , renderWatch = nv.utils.renderWatch(dispatch, duration)
+        , currentYDomain
         ;
 
     var stateGetter = function(data) {
@@ -3460,36 +3482,24 @@ nv.models.cumulativeLineChart = function() {
             x = lines.xScale();
             y = lines.yScale();
 
-            if (!rescaleY) {
-                var seriesDomains = data
-                    .filter(function(series) { return !series.disabled })
-                    .map(function(series,i) {
-                        var initialDomain = d3.extent(series.values, lines.y());
-
-                        //account for series being disabled when losing 95% or more
-                        if (initialDomain[0] < -.95) initialDomain[0] = -.95;
-
-                        return [
-                                (initialDomain[0] - initialDomain[1]) / (1 + initialDomain[1]),
-                                (initialDomain[1] - initialDomain[0]) / (1 + initialDomain[0])
-                        ];
-                    });
-
-                var completeDomain = [
-                    d3.min(seriesDomains, function(d) { return d[0] }),
-                    d3.max(seriesDomains, function(d) { return d[1] })
-                ];
-
-                lines.yDomain(completeDomain);
-            } else {
-                lines.yDomain(null);
-            }
 
             dx.domain([0, data[0].values.length - 1]) //Assumes all series have same length
                 .range([0, availableWidth])
                 .clamp(true);
 
             var data = indexify(index.i, data);
+
+            // initialize the starting yDomain for the not-rescale case after indexify (to have calculated point.display)
+            if (typeof(currentYDomain) === "undefined") {
+                currentYDomain = getCurrentYDomain(data);
+            }
+
+            if (!rescaleY) {
+                lines.yDomain(currentYDomain);
+                lines.clipEdge(true);
+            } else {
+                lines.yDomain(null);
+            }
 
             // Setup containers and skeleton of chart
             var interactivePointerEvents = (useInteractiveGuideline) ? "none" : "all";
@@ -3553,7 +3563,7 @@ nv.models.cumulativeLineChart = function() {
                     .attr("transform", "translate(" + availableWidth + ",0)");
             }
 
-            // Show error if series goes below 100%
+            // Show error if index point value is 0 (division by zero avoided)
             var tempDisabled = data.filter(function(d) { return d.tempDisabled });
 
             wrap.select('.tempDisabled').remove(); //clean-up and prevent duplicates
@@ -3723,8 +3733,10 @@ nv.models.cumulativeLineChart = function() {
             controls.dispatch.on('legendClick', function(d,i) {
                 d.disabled = !d.disabled;
                 rescaleY = !d.disabled;
-
                 state.rescaleY = rescaleY;
+                if (!rescaleY) {
+                    currentYDomain = getCurrentYDomain(data); // rescale is turned off, so set the currentYDomain
+                }
                 dispatch.stateChange(state);
                 chart.update();
             });
@@ -3743,7 +3755,7 @@ nv.models.cumulativeLineChart = function() {
                 data
                     .filter(function(series, i) {
                         series.seriesIndex = i;
-                        return !series.disabled;
+                        return !(series.disabled || series.tempDisabled);
                     })
                     .forEach(function(series,i) {
                         pointIndex = nv.interactiveBisect(series.values, e.pointXValue, chart.x());
@@ -3858,10 +3870,8 @@ nv.models.cumulativeLineChart = function() {
             }
             var v = indexifyYGetter(indexValue, idx);
 
-            //TODO: implement check below, and disable series if series loses 100% or more cause divide by 0 issue
-            if (v < -.95 && !noErrorCheck) {
-                //if a series loses more than 100%, calculations fail.. anything close can cause major distortion (but is mathematically correct till it hits 100)
-
+            // avoid divide by zero
+            if (Math.abs(v) < 0.00001 && !noErrorCheck) {
                 line.tempDisabled = true;
                 return line;
             }
@@ -3869,12 +3879,25 @@ nv.models.cumulativeLineChart = function() {
             line.tempDisabled = false;
 
             line.values = line.values.map(function(point, pointIndex) {
-                point.display = {'y': (indexifyYGetter(point, pointIndex) - v) / (1 + v) };
+                point.display = {'y': (indexifyYGetter(point, pointIndex) - v) / v };
                 return point;
             });
 
             return line;
         })
+    }
+
+    function getCurrentYDomain(data) {
+        var seriesDomains = data
+            .filter(function(series) { return !(series.disabled || series.tempDisabled)})
+            .map(function(series,i) {
+                return d3.extent(series.values, function (d) { return d.display.y });
+            });
+
+        return [
+            d3.min(seriesDomains, function(d) { return d[0] }),
+            d3.max(seriesDomains, function(d) { return d[1] })
+        ];
     }
 
     //============================================================
@@ -3898,7 +3921,6 @@ nv.models.cumulativeLineChart = function() {
         // simple options, just get/set the necessary values
         width:      {get: function(){return width;}, set: function(_){width=_;}},
         height:     {get: function(){return height;}, set: function(_){height=_;}},
-        rescaleY:     {get: function(){return rescaleY;}, set: function(_){rescaleY=_;}},
         showControls:     {get: function(){return showControls;}, set: function(_){showControls=_;}},
         showLegend: {get: function(){return showLegend;}, set: function(_){showLegend=_;}},
         average: {get: function(){return average;}, set: function(_){average=_;}},
@@ -3909,6 +3931,10 @@ nv.models.cumulativeLineChart = function() {
         noErrorCheck:    {get: function(){return noErrorCheck;}, set: function(_){noErrorCheck=_;}},
 
         // options that require extra logic in the setter
+        rescaleY:     {get: function(){return rescaleY;}, set: function(_){
+            rescaleY = _;
+            chart.state.rescaleY = _; // also update state
+        }},
         margin: {get: function(){return margin;}, set: function(_){
             if (_.top !== undefined) {
                 margin.top = _.top;
@@ -6768,7 +6794,7 @@ nv.models.lineChart = function() {
         , state = nv.utils.state()
         , defaultState = null
         , noData = null
-        , dispatch = d3.dispatch('tooltipShow', 'tooltipHide', 'stateChange', 'changeState', 'renderEnd')
+        , dispatch = d3.dispatch('stateChange', 'changeState', 'renderEnd')
         , duration = 250
         ;
 
@@ -7025,15 +7051,7 @@ nv.models.lineChart = function() {
                     })
                     .forEach(function(series,i) {
                         var extent = focus.brush.extent() !== null ? (focus.brush.empty() ? focus.xScale().domain() : focus.brush.extent()) : x.domain();
-                        var currentValues = series.values.filter(function(d,i) {
-                            // Checks if the x point is between the extents, handling case where extent[0] is greater than extent[1]
-                            // (e.g. x domain is manually set to reverse the x-axis)
-                            if(extent[0] <= extent[1]) {
-                                return lines.x()(d,i) >= extent[0] && lines.x()(d,i) <= extent[1];
-                            } else {
-                                return lines.x()(d,i) >= extent[1] && lines.x()(d,i) <= extent[0];
-                            }
-                        });
+                        var currentValues = series.values;
 
                         pointIndex = nv.interactiveBisect(currentValues, e.pointXValue, lines.x());
                         var point = currentValues[pointIndex];
@@ -9899,8 +9917,12 @@ nv.models.multiChart = function() {
                 if (extraValue1BarStacked.length > 0)
                     extraValue1BarStacked = extraValue1BarStacked.reduce(function(a,b){
                         return a.map(function(aVal,i){return {x: aVal.x, y: aVal.y + b[i].y}})
-                    }).concat([{x:0, y:0}]);
+                    });
             }
+            if (dataBars1.length) {
+                extraValue1BarStacked.push({x:0, y:0});
+            }
+            
             var extraValue2BarStacked = [];
             if (bars2.stacked() && dataBars2.length) {
                 var extraValue2BarStacked = dataBars2.filter(function(d){return !d.disabled}).map(function(a){return a.values});
@@ -9908,7 +9930,10 @@ nv.models.multiChart = function() {
                 if (extraValue2BarStacked.length > 0)
                     extraValue2BarStacked = extraValue2BarStacked.reduce(function(a,b){
                         return a.map(function(aVal,i){return {x: aVal.x, y: aVal.y + b[i].y}})
-                    }).concat([{x:0, y:0}]);
+                    });
+            }
+            if (dataBars2.length) {
+                extraValue2BarStacked.push({x:0, y:0});
             }
             
             yScale1 .domain(yDomain1 || d3.extent(d3.merge(series1).concat(extraValue1BarStacked), function(d) { return d.y } ))
@@ -11336,6 +11361,7 @@ nv.models.pie = function() {
         , labelsOutside = false
         , labelType = "key"
         , labelThreshold = .02 //if slice percentage is under this, don't show label
+        , hideOverlapLabels = false //Hide labels that don't fit in slice
         , donut = false
         , title = false
         , growOnHover = true
@@ -11657,6 +11683,44 @@ nv.models.pie = function() {
                         return label;
                     })
                 ;
+
+                if (hideOverlapLabels) {
+                    pieLabels
+                        .each(function (d, i) {
+                            if (!this.getBBox) return;
+                            var bb = this.getBBox(),
+                            center = labelsArc[i].centroid(d);
+                            var topLeft = {
+                              x : center[0] + bb.x,
+                              y : center[1] + bb.y
+                            };
+
+                            var topRight = {
+                              x : topLeft.x + bb.width,
+                              y : topLeft.y
+                            };
+
+                            var bottomLeft = {
+                              x : topLeft.x,
+                              y : topLeft.y + bb.height
+                            };
+
+                            var bottomRight = {
+                              x : topLeft.x + bb.width,
+                              y : topLeft.y + bb.height
+                            };
+
+                            d.visible = nv.utils.pointIsInArc(topLeft, d, arc) &&
+                            nv.utils.pointIsInArc(topRight, d, arc) &&
+                            nv.utils.pointIsInArc(bottomLeft, d, arc) &&
+                            nv.utils.pointIsInArc(bottomRight, d, arc);
+                        })
+                        .style('display', function (d) {
+                            return d.visible ? null : 'none';
+                        })
+                    ;
+                }
+
             }
 
 
@@ -11698,6 +11762,7 @@ nv.models.pie = function() {
         title:      {get: function(){return title;}, set: function(_){title=_;}},
         titleOffset:    {get: function(){return titleOffset;}, set: function(_){titleOffset=_;}},
         labelThreshold: {get: function(){return labelThreshold;}, set: function(_){labelThreshold=_;}},
+        hideOverlapLabels: {get: function(){return hideOverlapLabels;}, set: function(_){hideOverlapLabels=_;}},
         valueFormat:    {get: function(){return valueFormat;}, set: function(_){valueFormat=_;}},
         x:          {get: function(){return getX;}, set: function(_){getX=_;}},
         id:         {get: function(){return id;}, set: function(_){id=_;}},
@@ -12708,7 +12773,7 @@ nv.models.scatter = function() {
             });
 
             // Setup Scales
-            var logScale = chart.yScale().name === d3.scale.log().name ? true : false;
+            var logScale = (typeof(chart.yScale().base) === "function"); // Only log scale has a method "base()"
             // remap and flatten the data for use in calculating the scales' domains
             var seriesData = (xDomain && yDomain && sizeDomain) ? [] : // if we know xDomain and yDomain and sizeDomain, no need to calculate.... if Size is constant remember to set sizeDomain to speed up performance
                 d3.merge(
@@ -14781,7 +14846,7 @@ nv.models.stackedAreaChart = function() {
 
             interactiveLayer.dispatch.on('elementMousemove', function(e) {
                 stacked.clearHighlights();
-                var singlePoint, pointIndex, pointXLocation, allData = [], valueSum = 0, allNullValues = true;
+                var singlePoint, pointIndex, pointXLocation, allData = [], valueSum = 0, allNullValues = true, atleastOnePoint = false;
                 data
                     .filter(function(series, i) {
                         series.seriesIndex = i;
@@ -14793,6 +14858,7 @@ nv.models.stackedAreaChart = function() {
                         var pointYValue = chart.y()(point, pointIndex);
                         if (pointYValue != null && pointYValue > 0) {
                             stacked.highlightPoint(i, pointIndex, true);
+                            atleastOnePoint = true;
                         }
                     
                         // Draw at least one point if all values are zero.

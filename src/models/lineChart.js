@@ -288,15 +288,7 @@ nv.models.lineChart = function() {
                     })
                     .forEach(function(series,i) {
                         var extent = focus.brush.extent() !== null ? (focus.brush.empty() ? focus.xScale().domain() : focus.brush.extent()) : x.domain();
-                        var currentValues = series.values.filter(function(d,i) {
-                            // Checks if the x point is between the extents, handling case where extent[0] is greater than extent[1]
-                            // (e.g. x domain is manually set to reverse the x-axis)
-                            if(extent[0] <= extent[1]) {
-                                return lines.x()(d,i) >= extent[0] && lines.x()(d,i) <= extent[1];
-                            } else {
-                                return lines.x()(d,i) >= extent[1] && lines.x()(d,i) <= extent[0];
-                            }
-                        });
+                        var currentValues = series.values;
 
                         pointIndex = nv.interactiveBisect(currentValues, e.pointXValue, lines.x());
                         var point = currentValues[pointIndex];
